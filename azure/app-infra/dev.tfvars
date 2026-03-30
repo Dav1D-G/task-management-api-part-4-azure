@@ -1,0 +1,8 @@
+location                        = "westeurope"
+resource_group_name             = "rg-task-api-dev"
+environment_name                = "dev"
+acr_name                        = "taskapidevacr001"
+log_analytics_workspace_name    = "log-task-api-dev"
+container_apps_environment_name = "cae-task-api-dev"
+container_app_name              = "ca-task-api-dev"
+key_vault_name                  = "kv-task-api-dev-001"

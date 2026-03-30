@@ -1,0 +1,228 @@
+pipeline {
+  agent none
+
+  environment {
+    APP_DIR             = 'jenkins-app'
+    INFRA_DIR           = 'azure/app-infra'
+    AZ_LOCATION         = 'westeurope'
+    AZ_SUBSCRIPTION_ID  = '47833278-569e-459a-9601-d67fa4fdb210'
+  }
+
+  options {
+    timestamps()
+    disableConcurrentBuilds()
+    skipDefaultCheckout(true)
+  }
+
+  parameters {
+    choice(name: 'ENV', choices: ['dev', 'prod'], description: 'Target environment')
+    booleanParam(name: 'RUN_TESTS', defaultValue: true, description: 'Run automated tests')
+    string(name: 'BUILD_VERSION', defaultValue: '0.1.0', description: 'Build version label')
+  }
+
+  stages {
+    stage('Checkout') {
+      agent { label 'agent-ci' }
+      steps {
+        checkout scm
+        stash name: 'source', includes: '**/*'
+      }
+    }
+
+    stage('Install Dependencies') {
+      agent { label 'agent-ci' }
+      steps {
+        unstash 'source'
+        dir("${APP_DIR}") {
+          sh 'npm install'
+        }
+        stash name: 'source', includes: '**/*'
+      }
+    }
+
+    stage('Run Tests') {
+      when {
+        expression { return params.RUN_TESTS }
+      }
+      agent { label 'agent-ci' }
+      steps {
+        unstash 'source'
+        dir("${APP_DIR}") {
+          sh 'npm test'
+        }
+        stash name: 'source', includes: '**/*'
+      }
+    }
+
+    stage('Build Metadata') {
+      agent { label 'agent-ci' }
+      steps {
+        unstash 'source'
+        dir("${APP_DIR}") {
+          script {
+            def content = "BUILD_VERSION=${params.BUILD_VERSION}\nENV=${params.ENV}\nRUN_TESTS=${params.RUN_TESTS}\n"
+            writeFile file: 'build-info.txt', text: content
+            echo "Build info written: BUILD_VERSION=${params.BUILD_VERSION}, ENV=${params.ENV}, RUN_TESTS=${params.RUN_TESTS}"
+          }
+        }
+        archiveArtifacts artifacts: "${APP_DIR}/build-info.txt", allowEmptyArchive: false
+        stash name: 'source', includes: '**/*'
+      }
+    }
+
+    stage('Docker Build') {
+      agent { label 'agent-docker' }
+      steps {
+        unstash 'source'
+        dir("${APP_DIR}") {
+          sh 'docker build -t task-api:local .'
+        }
+      }
+    }
+
+    stage('Credentials Check') {
+      agent { label 'agent-infra' }
+      steps {
+        withCredentials([usernamePassword(credentialsId: 'azure-sp', usernameVariable: 'AZURE_CLIENT_ID', passwordVariable: 'AZURE_CLIENT_SECRET')]) {
+          sh 'test -n "$AZURE_CLIENT_ID" && test -n "$AZURE_CLIENT_SECRET" && test -n "$AZURE_TENANT_ID" && test -n "$AZURE_SUBSCRIPTION_ID"'
+        }
+        echo 'Azure credentials loaded successfully'
+      }
+    }
+
+    stage('Docker Run') {
+      agent { label 'agent-docker' }
+      steps {
+        unstash 'source'
+        dir("${APP_DIR}") {
+          sh '''
+            set -e
+            docker rm -f task-api-local >/dev/null 2>&1 || true
+            docker run -d --name task-api-local -p 3000:3000 task-api:local
+            for i in $(seq 1 10); do
+              if docker run --rm --network container:task-api-local curlimages/curl:8.7.1 -fsS http://127.0.0.1:3000/health >/dev/null; then
+                echo "Health check OK"
+                exit 0
+              fi
+              sleep 1
+            done
+            echo "Health check failed"
+            exit 1
+          '''
+        }
+      }
+    }
+
+    stage('Prepare ACR and App Base') {
+      agent { label 'agent-infra' }
+      steps {
+        unstash 'source'
+        sh '''
+          set -e
+          cd "${INFRA_DIR}"
+          terraform init -reconfigure -backend-config="backend.hcl"
+          terraform apply -auto-approve -target=azurerm_resource_group.app -target=azurerm_container_registry.app -var-file="${ENV}.tfvars"
+          terraform output -raw acr_login_server > "${WORKSPACE}/acr_login_server.txt"
+          terraform output -raw acr_name > "${WORKSPACE}/acr_name.txt"
+        '''
+        stash name: 'acr-info', includes: 'acr_login_server.txt,acr_name.txt'
+      }
+    }
+
+    stage('Docker Push to ACR') {
+      agent { label 'agent-docker' }
+      steps {
+        unstash 'acr-info'
+        withCredentials([usernamePassword(credentialsId: 'azure-sp', usernameVariable: 'AZURE_CLIENT_ID', passwordVariable: 'AZURE_CLIENT_SECRET')]) {
+          sh '''
+            set -e
+
+            ACR_LOGIN_SERVER="$(cat acr_login_server.txt)"
+            IMAGE_TAG="${BUILD_VERSION}-${BUILD_NUMBER}"
+            IMAGE_URI="${ACR_LOGIN_SERVER}/task-api:${IMAGE_TAG}"
+
+            az login --service-principal -u "${AZURE_CLIENT_ID}" -p "${AZURE_CLIENT_SECRET}" --tenant "${AZURE_TENANT_ID}"
+            az account set --subscription "${AZURE_SUBSCRIPTION_ID:-$AZ_SUBSCRIPTION_ID}"
+            az acr login --name "$(cat acr_name.txt)"
+            docker tag task-api:local "${IMAGE_URI}"
+            docker push "${IMAGE_URI}"
+
+            echo "${IMAGE_URI}" > image_uri.txt
+          '''
+        }
+        stash name: 'image-info', includes: 'image_uri.txt'
+      }
+    }
+
+    stage('Terraform Plan') {
+      agent { label 'agent-infra' }
+      steps {
+        unstash 'source'
+        unstash 'image-info'
+        sh '''
+          set -e
+          IMAGE_URI="$(cat image_uri.txt)"
+          cd "${INFRA_DIR}"
+          terraform init -reconfigure -backend-config="backend.hcl"
+          terraform plan -var-file="${ENV}.tfvars" -var="container_image=${IMAGE_URI}" -out=tfplan
+        '''
+        stash name: 'tfplan', includes: "${INFRA_DIR}/tfplan"
+      }
+    }
+
+    stage('Approve Production Deploy') {
+      when {
+        expression { return params.ENV == 'prod' }
+      }
+      steps {
+        timeout(time: 15, unit: 'MINUTES') {
+          input message: 'Approve production deployment?', ok: 'Deploy'
+        }
+      }
+    }
+
+    stage('Terraform Apply') {
+      agent { label 'agent-infra' }
+      steps {
+        unstash 'source'
+        unstash 'tfplan'
+        sh '''
+          set -e
+          cd "${INFRA_DIR}"
+          terraform init -reconfigure -backend-config="backend.hcl"
+          terraform apply -auto-approve tfplan
+          terraform output -raw app_url > "${WORKSPACE}/app_url.txt"
+        '''
+        stash name: 'app-info', includes: 'app_url.txt'
+      }
+    }
+
+    stage('Post-Deployment Health Check') {
+      agent { label 'agent-infra' }
+      steps {
+        unstash 'app-info'
+        sh '''
+          set -e
+          APP_URL="$(cat app_url.txt)"
+          curl -fsS "${APP_URL}/health" >/dev/null
+          echo "Deployment validation OK: ${APP_URL}/health"
+        '''
+      }
+    }
+  }
+
+  post {
+    success {
+      echo 'Build completed successfully'
+    }
+    failure {
+      echo 'Build failed - check logs'
+    }
+    always {
+      node('agent-docker') {
+        sh 'docker rm -f task-api-local >/dev/null 2>&1 || true'
+      }
+      echo 'Post-build actions completed'
+    }
+  }
+}

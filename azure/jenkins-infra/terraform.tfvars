@@ -1,0 +1,9 @@
+location            = "westeurope"
+resource_group_name = "rg-jenkins-part4-platform"
+vnet_cidr           = ["10.40.0.0/16"]
+public_subnet_cidr  = ["10.40.1.0/24"]
+private_subnet_cidr = ["10.40.2.0/24"]
+bastion_subnet_cidr = ["10.40.3.0/26"]
+admin_username      = "azureuser"
+public_key_path     = "C:/Users/Dawid/.ssh/jenkins_azure_ed25519.pub"
+vm_size             = "Standard_B2s"

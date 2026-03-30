@@ -1,0 +1,8 @@
+location                        = "westeurope"
+resource_group_name             = "rg-task-api-prod"
+environment_name                = "prod"
+acr_name                        = "taskapiprodacr001"
+log_analytics_workspace_name    = "log-task-api-prod"
+container_apps_environment_name = "cae-task-api-prod"
+container_app_name              = "ca-task-api-prod"
+key_vault_name                  = "kv-task-api-prod-001"
