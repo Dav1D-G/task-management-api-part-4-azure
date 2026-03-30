@@ -17,11 +17,15 @@ pipeline {
   parameters {
     choice(name: 'ENV', choices: ['dev', 'prod'], description: 'Target environment')
     booleanParam(name: 'RUN_TESTS', defaultValue: true, description: 'Run automated tests')
+    booleanParam(name: 'DESTROY_ONLY', defaultValue: false, description: 'Destroy app infrastructure only')
     string(name: 'BUILD_VERSION', defaultValue: '0.1.0', description: 'Build version label')
   }
 
   stages {
     stage('Checkout') {
+      when {
+        expression { return !params.DESTROY_ONLY }
+      }
       agent { label 'agent-ci' }
       steps {
         checkout scm
@@ -30,6 +34,9 @@ pipeline {
     }
 
     stage('Install Dependencies') {
+      when {
+        expression { return !params.DESTROY_ONLY }
+      }
       agent { label 'agent-ci' }
       steps {
         unstash 'source'
@@ -42,7 +49,7 @@ pipeline {
 
     stage('Run Tests') {
       when {
-        expression { return params.RUN_TESTS }
+        expression { return !params.DESTROY_ONLY && params.RUN_TESTS }
       }
       agent { label 'agent-ci' }
       steps {
@@ -55,6 +62,9 @@ pipeline {
     }
 
     stage('Build Metadata') {
+      when {
+        expression { return !params.DESTROY_ONLY }
+      }
       agent { label 'agent-ci' }
       steps {
         unstash 'source'
@@ -71,6 +81,9 @@ pipeline {
     }
 
     stage('Docker Build') {
+      when {
+        expression { return !params.DESTROY_ONLY }
+      }
       agent { label 'agent-docker' }
       steps {
         unstash 'source'
@@ -81,6 +94,9 @@ pipeline {
     }
 
     stage('Credentials Check') {
+      when {
+        expression { return !params.DESTROY_ONLY }
+      }
       agent { label 'agent-infra' }
       steps {
         withCredentials([usernamePassword(credentialsId: 'azure-sp', usernameVariable: 'AZURE_CLIENT_ID', passwordVariable: 'AZURE_CLIENT_SECRET')]) {
@@ -91,6 +107,9 @@ pipeline {
     }
 
     stage('Docker Run') {
+      when {
+        expression { return !params.DESTROY_ONLY }
+      }
       agent { label 'agent-docker' }
       steps {
         unstash 'source'
@@ -114,6 +133,9 @@ pipeline {
     }
 
     stage('Prepare ACR and App Base') {
+      when {
+        expression { return !params.DESTROY_ONLY }
+      }
       agent { label 'agent-infra' }
       steps {
         unstash 'source'
@@ -139,6 +161,9 @@ pipeline {
     }
 
     stage('Docker Push to ACR') {
+      when {
+        expression { return !params.DESTROY_ONLY }
+      }
       agent { label 'agent-docker' }
       steps {
         unstash 'acr-info'
@@ -164,6 +189,9 @@ pipeline {
     }
 
     stage('Terraform Plan') {
+      when {
+        expression { return !params.DESTROY_ONLY }
+      }
       agent { label 'agent-infra' }
       steps {
         unstash 'source'
@@ -190,7 +218,7 @@ pipeline {
 
     stage('Approve Production Deploy') {
       when {
-        expression { return params.ENV == 'prod' }
+        expression { return !params.DESTROY_ONLY && params.ENV == 'prod' }
       }
       steps {
         timeout(time: 15, unit: 'MINUTES') {
@@ -200,6 +228,9 @@ pipeline {
     }
 
     stage('Terraform Apply') {
+      when {
+        expression { return !params.DESTROY_ONLY }
+      }
       agent { label 'agent-infra' }
       steps {
         unstash 'source'
@@ -224,7 +255,35 @@ pipeline {
       }
     }
 
+    stage('Destroy App Infra') {
+      when {
+        expression { return params.DESTROY_ONLY }
+      }
+      agent { label 'agent-infra' }
+      steps {
+        checkout scm
+        withCredentials([usernamePassword(credentialsId: 'azure-sp', usernameVariable: 'AZURE_CLIENT_ID', passwordVariable: 'AZURE_CLIENT_SECRET')]) {
+          withEnv([
+            "ARM_CLIENT_ID=${AZURE_CLIENT_ID}",
+            "ARM_CLIENT_SECRET=${AZURE_CLIENT_SECRET}",
+            "ARM_TENANT_ID=${env.AZURE_TENANT_ID}",
+            "ARM_SUBSCRIPTION_ID=${env.AZURE_SUBSCRIPTION_ID ?: env.AZ_SUBSCRIPTION_ID}"
+          ]) {
+            sh '''
+              set -e
+              cd "${INFRA_DIR}"
+              terraform init -reconfigure -backend-config="backend.hcl"
+              terraform destroy -auto-approve -var-file="${ENV}.tfvars"
+            '''
+          }
+        }
+      }
+    }
+
     stage('Post-Deployment Health Check') {
+      when {
+        expression { return !params.DESTROY_ONLY }
+      }
       agent { label 'agent-infra' }
       steps {
         unstash 'app-info'
