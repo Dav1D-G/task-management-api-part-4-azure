@@ -117,14 +117,23 @@ pipeline {
       agent { label 'agent-infra' }
       steps {
         unstash 'source'
-        sh '''
-          set -e
-          cd "${INFRA_DIR}"
-          terraform init -reconfigure -backend-config="backend.hcl"
-          terraform apply -auto-approve -target=azurerm_resource_group.app -target=azurerm_container_registry.app -var-file="${ENV}.tfvars"
-          terraform output -raw acr_login_server > "${WORKSPACE}/acr_login_server.txt"
-          terraform output -raw acr_name > "${WORKSPACE}/acr_name.txt"
-        '''
+        withCredentials([usernamePassword(credentialsId: 'azure-sp', usernameVariable: 'AZURE_CLIENT_ID', passwordVariable: 'AZURE_CLIENT_SECRET')]) {
+          withEnv([
+            "ARM_CLIENT_ID=${AZURE_CLIENT_ID}",
+            "ARM_CLIENT_SECRET=${AZURE_CLIENT_SECRET}",
+            "ARM_TENANT_ID=${env.AZURE_TENANT_ID}",
+            "ARM_SUBSCRIPTION_ID=${env.AZURE_SUBSCRIPTION_ID ?: env.AZ_SUBSCRIPTION_ID}"
+          ]) {
+            sh '''
+              set -e
+              cd "${INFRA_DIR}"
+              terraform init -reconfigure -backend-config="backend.hcl"
+              terraform apply -auto-approve -target=azurerm_resource_group.app -target=azurerm_container_registry.app -var-file="${ENV}.tfvars"
+              terraform output -raw acr_login_server > "${WORKSPACE}/acr_login_server.txt"
+              terraform output -raw acr_name > "${WORKSPACE}/acr_name.txt"
+            '''
+          }
+        }
         stash name: 'acr-info', includes: 'acr_login_server.txt,acr_name.txt'
       }
     }
@@ -159,13 +168,22 @@ pipeline {
       steps {
         unstash 'source'
         unstash 'image-info'
-        sh '''
-          set -e
-          IMAGE_URI="$(cat image_uri.txt)"
-          cd "${INFRA_DIR}"
-          terraform init -reconfigure -backend-config="backend.hcl"
-          terraform plan -var-file="${ENV}.tfvars" -var="container_image=${IMAGE_URI}" -out=tfplan
-        '''
+        withCredentials([usernamePassword(credentialsId: 'azure-sp', usernameVariable: 'AZURE_CLIENT_ID', passwordVariable: 'AZURE_CLIENT_SECRET')]) {
+          withEnv([
+            "ARM_CLIENT_ID=${AZURE_CLIENT_ID}",
+            "ARM_CLIENT_SECRET=${AZURE_CLIENT_SECRET}",
+            "ARM_TENANT_ID=${env.AZURE_TENANT_ID}",
+            "ARM_SUBSCRIPTION_ID=${env.AZURE_SUBSCRIPTION_ID ?: env.AZ_SUBSCRIPTION_ID}"
+          ]) {
+            sh '''
+              set -e
+              IMAGE_URI="$(cat image_uri.txt)"
+              cd "${INFRA_DIR}"
+              terraform init -reconfigure -backend-config="backend.hcl"
+              terraform plan -var-file="${ENV}.tfvars" -var="container_image=${IMAGE_URI}" -out=tfplan
+            '''
+          }
+        }
         stash name: 'tfplan', includes: "${INFRA_DIR}/tfplan"
       }
     }
@@ -186,13 +204,22 @@ pipeline {
       steps {
         unstash 'source'
         unstash 'tfplan'
-        sh '''
-          set -e
-          cd "${INFRA_DIR}"
-          terraform init -reconfigure -backend-config="backend.hcl"
-          terraform apply -auto-approve tfplan
-          terraform output -raw app_url > "${WORKSPACE}/app_url.txt"
-        '''
+        withCredentials([usernamePassword(credentialsId: 'azure-sp', usernameVariable: 'AZURE_CLIENT_ID', passwordVariable: 'AZURE_CLIENT_SECRET')]) {
+          withEnv([
+            "ARM_CLIENT_ID=${AZURE_CLIENT_ID}",
+            "ARM_CLIENT_SECRET=${AZURE_CLIENT_SECRET}",
+            "ARM_TENANT_ID=${env.AZURE_TENANT_ID}",
+            "ARM_SUBSCRIPTION_ID=${env.AZURE_SUBSCRIPTION_ID ?: env.AZ_SUBSCRIPTION_ID}"
+          ]) {
+            sh '''
+              set -e
+              cd "${INFRA_DIR}"
+              terraform init -reconfigure -backend-config="backend.hcl"
+              terraform apply -auto-approve tfplan
+              terraform output -raw app_url > "${WORKSPACE}/app_url.txt"
+            '''
+          }
+        }
         stash name: 'app-info', includes: 'app_url.txt'
       }
     }
